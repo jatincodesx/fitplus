@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+**/node_modules
 /.pnp
 .pnp.*
 .yarn/*
@@ -32,6 +33,8 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+!**/.env.example
 
 # vercel
 .vercel
@@ -39,3 +42,19 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# expo
+**/.expo
+expo-env.d.ts
+
+# prisma/local database artifacts
+prisma/*.db
+prisma/**/*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+*.sqlite3
+
+# build/cache
+dist
+.cache

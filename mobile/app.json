@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "FitPlus",
+    "slug": "fitplus-mobile",
+    "scheme": "fitplus",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.fitplus.mobile"
+    },
+    "android": {
+      "package": "com.fitplus.mobile"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "fitplus-mobile-local"
+      }
+    }
+  }
+}
