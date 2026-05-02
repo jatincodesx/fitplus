@@ -10,7 +10,7 @@ import type { JWT } from "next-auth/jwt";
 import AppleProvider from "next-auth/providers/apple";
 import CredentialsProvider from "next-auth/providers/credentials";
 import GoogleProvider from "next-auth/providers/google";
-import { compare } from "bcryptjs";
+import { compare, compareSync } from "bcryptjs";
 import { PrismaAdapter } from "@next-auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/api";
@@ -25,6 +25,11 @@ const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 const SESSION_UPDATE_AGE_SECONDS = 60 * 60 * 4;
 const AUTH_COOKIE_NAME_SECURE = "__Secure-next-auth.session-token";
 const AUTH_COOKIE_NAME_INSECURE = "next-auth.session-token";
+const AUTH_DB_TIMEOUT_MS = Number(process.env.AUTH_DB_TIMEOUT_MS ?? 8000);
+const isCloudflareWorkerRuntime =
+  typeof (globalThis as { WebSocketPair?: unknown }).WebSocketPair !== "undefined" &&
+  typeof caches !== "undefined" &&
+  typeof Response !== "undefined";
 
 type SessionUser = {
   id: string;
@@ -120,6 +125,78 @@ function logAuthDebug(event: string, metadata?: Record<string, unknown>) {
   console.info(`[auth-debug] ${event}${payload}`);
 }
 
+function logAuthError(event: string, metadata?: Record<string, unknown>) {
+  const context = metadata ? metadata : {};
+  console.error("[auth-error]", {
+    event,
+    ...context,
+  });
+}
+
+function isSessionInvalidError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return (
+    error.message === "SessionMissing" ||
+    error.message === "SessionExpired" ||
+    error.message === "AccountDisabled"
+  );
+}
+
+async function withAuthTimeout<T>(label: string, task: () => Promise<T>): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`AuthTimeout:${label}`)), AUTH_DB_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([task(), timeout]);
+  } catch (error) {
+    logAuthError("step-failed", {
+      label,
+      error: error instanceof Error ? error.message : "UnknownError",
+    });
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+async function runAuthSideEffect(label: string, task: () => Promise<void>) {
+  try {
+    await withAuthTimeout(label, task);
+  } catch (error) {
+    logAuthDebug("side-effect-failed", {
+      label,
+      error: error instanceof Error ? error.message : "UnknownError",
+    });
+  }
+}
+
+async function verifyPassword(password: string, passwordHash: string) {
+  logAuthDebug("password-verify-start", {
+    runtime: isCloudflareWorkerRuntime ? "worker" : "node",
+  });
+
+  try {
+    const isValid = isCloudflareWorkerRuntime
+      ? compareSync(password, passwordHash)
+      : await compare(password, passwordHash);
+
+    logAuthDebug("password-verify-done", { isValid });
+    return isValid;
+  } catch (error) {
+    logAuthError("password-verify-failed", {
+      error: error instanceof Error ? error.message : "UnknownError",
+    });
+    throw error;
+  }
+}
+
 function isOAuthEmailVerified(provider?: string | null, profile?: Record<string, unknown> | null) {
   if (!provider || provider === "credentials") {
     return true;
@@ -142,11 +219,18 @@ async function getDbUserForToken(token: AppJwt) {
     throw new Error("SessionMissing");
   }
 
-  const sessionRecord = await prisma.session.findUnique({
-    where: { sessionToken: token.sid },
-    include: {
-      user: true,
-    },
+  logAuthDebug("jwt-db-user-start", { userId: token.sub });
+  const sessionRecord = await withAuthTimeout("jwt-session-find", () =>
+    prisma.session.findUnique({
+      where: { sessionToken: token.sid },
+      include: {
+        user: true,
+      },
+    })
+  );
+  logAuthDebug("jwt-db-user-done", {
+    userId: token.sub,
+    found: Boolean(sessionRecord),
   });
 
   if (!sessionRecord) {
@@ -168,21 +252,26 @@ async function getDbUserForToken(token: AppJwt) {
     sessionRecord.updatedAt.getTime() + SESSION_UPDATE_AGE_SECONDS * 1000 <= Date.now();
 
   if (shouldRefresh) {
-    await prisma.$transaction([
+    logAuthDebug("jwt-refresh-start", { userId: sessionRecord.user.id });
+    const refreshExpiresAt = new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
+    await withAuthTimeout("jwt-refresh-session", () =>
       prisma.session.update({
         where: { id: sessionRecord.id },
         data: {
           lastActiveAt: new Date(),
-          expires: new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000),
+          expires: refreshExpiresAt,
         },
-      }),
+      })
+    );
+    await withAuthTimeout("jwt-refresh-user", () =>
       prisma.user.update({
         where: { id: sessionRecord.user.id },
         data: {
           lastSeenAt: new Date(),
         },
-      }),
-    ]);
+      })
+    );
+    logAuthDebug("jwt-refresh-done", { userId: sessionRecord.user.id });
   }
 
   return sessionRecord.user;
@@ -193,16 +282,19 @@ async function createJwtSession(userId: string) {
   const sessionToken = randomUUID();
   const expires = new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
   try {
-    await prisma.session.create({
-      data: {
-        sessionToken,
-        userId,
-        expires,
-        ipAddress: requestContext.ipAddress ?? null,
-        userAgent: requestContext.userAgent ?? null,
-        lastActiveAt: new Date(),
-      },
-    });
+    logAuthDebug("session-create-start", { userId });
+    await withAuthTimeout("jwt-session-create", () =>
+      prisma.session.create({
+        data: {
+          sessionToken,
+          userId,
+          expires,
+          ipAddress: requestContext.ipAddress ?? null,
+          userAgent: requestContext.userAgent ?? null,
+          lastActiveAt: new Date(),
+        },
+      })
+    );
     logAuthDebug("session-create-success", { userId });
   } catch (error) {
     logAuthDebug("session-create-failure", {
@@ -243,10 +335,14 @@ function getBearerToken(requestHeaders: Headers) {
 }
 
 async function getSessionUserFromSessionToken(sessionToken: string): Promise<SessionUser | null> {
-  const sessionRecord = await prisma.session.findUnique({
-    where: { sessionToken },
-    include: { user: true },
-  });
+  logAuthDebug("bearer-session-start");
+  const sessionRecord = await withAuthTimeout("bearer-session-find", () =>
+    prisma.session.findUnique({
+      where: { sessionToken },
+      include: { user: true },
+    })
+  );
+  logAuthDebug("bearer-session-done", { found: Boolean(sessionRecord) });
 
   if (!sessionRecord) {
     return null;
@@ -277,21 +373,26 @@ async function getSessionUserFromSessionToken(sessionToken: string): Promise<Ses
     sessionRecord.updatedAt.getTime() + SESSION_UPDATE_AGE_SECONDS * 1000 <= Date.now();
 
   if (shouldRefresh) {
-    await prisma.$transaction([
+    const refreshExpiresAt = new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
+    logAuthDebug("bearer-refresh-start", { userId: sessionRecord.user.id });
+    await withAuthTimeout("bearer-refresh-session", () =>
       prisma.session.update({
         where: { id: sessionRecord.id },
         data: {
           lastActiveAt: new Date(),
-          expires: new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000),
+          expires: refreshExpiresAt,
         },
-      }),
+      })
+    );
+    await withAuthTimeout("bearer-refresh-user", () =>
       prisma.user.update({
         where: { id: sessionRecord.user.id },
         data: {
           lastSeenAt: new Date(),
         },
-      }),
-    ]);
+      })
+    );
+    logAuthDebug("bearer-refresh-done", { userId: sessionRecord.user.id });
   }
 
   return {
@@ -311,6 +412,7 @@ export async function authenticatePasswordUser(
   credentials: unknown,
   request?: Request
 ): Promise<SessionUser | null> {
+  logAuthDebug("password-auth-start");
   const parsed = signInSchema.safeParse(credentials);
   const requestContext = await getAuditRequestContext(
     request
@@ -321,76 +423,96 @@ export async function authenticatePasswordUser(
   );
 
   if (!parsed.success) {
-    await createAuditLog({
-      eventType: "AUTH_SIGN_IN_FAILED",
-      entityType: "User",
-      metadata: {
-        reason: "INVALID_CREDENTIAL_PAYLOAD",
-      },
-      ipAddress: requestContext.ipAddress,
-      userAgent: requestContext.userAgent,
-    });
+    logAuthDebug("password-auth-invalid-payload");
+    void runAuthSideEffect("audit-invalid-credential-payload", () =>
+      createAuditLog({
+        eventType: "AUTH_SIGN_IN_FAILED",
+        entityType: "User",
+        metadata: {
+          reason: "INVALID_CREDENTIAL_PAYLOAD",
+        },
+        ipAddress: requestContext.ipAddress,
+        userAgent: requestContext.userAgent,
+      }).then(() => undefined)
+    );
     return null;
   }
 
   const email = normalizeEmail(parsed.data.email);
-  const user = await prisma.user.findUnique({
-    where: { email },
+  logAuthDebug("password-auth-user-query-start");
+  const user = await withAuthTimeout("authorize-find-user", () =>
+    prisma.user.findUnique({
+      where: { email },
+    })
+  );
+  logAuthDebug("password-auth-user-query-done", {
+    found: Boolean(user),
   });
 
   if (!user) {
-    await createAuditLog({
-      eventType: "AUTH_SIGN_IN_FAILED",
-      entityType: "User",
-      metadata: { reason: "EMAIL_NOT_FOUND", email },
-      ipAddress: requestContext.ipAddress,
-      userAgent: requestContext.userAgent,
-    });
+    void runAuthSideEffect("audit-email-not-found", () =>
+      createAuditLog({
+        eventType: "AUTH_SIGN_IN_FAILED",
+        entityType: "User",
+        metadata: { reason: "EMAIL_NOT_FOUND", email },
+        ipAddress: requestContext.ipAddress,
+        userAgent: requestContext.userAgent,
+      }).then(() => undefined)
+    );
     return null;
   }
 
   if (user.status !== "ACTIVE") {
-    await createAuditLog({
-      actorUserId: user.id,
-      targetUserId: user.id,
-      eventType: "AUTH_SIGN_IN_FAILED",
-      entityType: "User",
-      entityId: user.id,
-      metadata: { reason: "ACCOUNT_NOT_ACTIVE", status: user.status },
-      ipAddress: requestContext.ipAddress,
-      userAgent: requestContext.userAgent,
-    });
+    void runAuthSideEffect("audit-account-not-active", () =>
+      createAuditLog({
+        actorUserId: user.id,
+        targetUserId: user.id,
+        eventType: "AUTH_SIGN_IN_FAILED",
+        entityType: "User",
+        entityId: user.id,
+        metadata: { reason: "ACCOUNT_NOT_ACTIVE", status: user.status },
+        ipAddress: requestContext.ipAddress,
+        userAgent: requestContext.userAgent,
+      }).then(() => undefined)
+    );
     throw new Error("AccountDisabled");
   }
 
   if (!user.password) {
-    await createAuditLog({
-      actorUserId: user.id,
-      targetUserId: user.id,
-      eventType: "AUTH_SIGN_IN_FAILED",
-      entityType: "User",
-      entityId: user.id,
-      metadata: { reason: "PASSWORD_NOT_SET" },
-      ipAddress: requestContext.ipAddress,
-      userAgent: requestContext.userAgent,
-    });
+    void runAuthSideEffect("audit-password-not-set", () =>
+      createAuditLog({
+        actorUserId: user.id,
+        targetUserId: user.id,
+        eventType: "AUTH_SIGN_IN_FAILED",
+        entityType: "User",
+        entityId: user.id,
+        metadata: { reason: "PASSWORD_NOT_SET" },
+        ipAddress: requestContext.ipAddress,
+        userAgent: requestContext.userAgent,
+      }).then(() => undefined)
+    );
     throw new Error("OAuthAccountNotLinked");
   }
 
-  const isValid = await compare(parsed.data.password, user.password);
+  const isValid = await verifyPassword(parsed.data.password, user.password);
   if (!isValid) {
-    await createAuditLog({
-      actorUserId: user.id,
-      targetUserId: user.id,
-      eventType: "AUTH_SIGN_IN_FAILED",
-      entityType: "User",
-      entityId: user.id,
-      metadata: { reason: "PASSWORD_MISMATCH" },
-      ipAddress: requestContext.ipAddress,
-      userAgent: requestContext.userAgent,
-    });
+    void runAuthSideEffect("audit-password-mismatch", () =>
+      createAuditLog({
+        actorUserId: user.id,
+        targetUserId: user.id,
+        eventType: "AUTH_SIGN_IN_FAILED",
+        entityType: "User",
+        entityId: user.id,
+        metadata: { reason: "PASSWORD_MISMATCH" },
+        ipAddress: requestContext.ipAddress,
+        userAgent: requestContext.userAgent,
+      }).then(() => undefined)
+    );
+    logAuthDebug("password-auth-password-mismatch", { userId: user.id });
     return null;
   }
+
+  logAuthDebug("password-auth-success", { userId: user.id });
 
   return {
     id: user.id,
@@ -443,7 +565,6 @@ export async function createAppSession(userId: string) {
 export const authOptions: NextAuthOptions = {
   adapter,
   secret: process.env.NEXTAUTH_SECRET,
-  trustHost: true,
   useSecureCookies: shouldUseSecureAuthCookies(),
   cookies: {
     sessionToken: {
@@ -469,10 +590,13 @@ export const authOptions: NextAuthOptions = {
         password: { label: "Password", type: "password" },
       },
       async authorize(credentials, request) {
+        logAuthDebug("credentials-authorize-start");
         const user = await authenticatePasswordUser(credentials, request as Request | undefined);
         if (!user) {
+          logAuthDebug("credentials-authorize-failed");
           return null;
         }
+        logAuthDebug("credentials-authorize-success", { userId: user.id });
 
         return {
           id: user.id,
@@ -515,8 +639,10 @@ export const authOptions: NextAuthOptions = {
   },
   callbacks: {
     async signIn({ user, account, profile }) {
+      logAuthDebug("callback-signin-start", { provider: account?.provider ?? "unknown" });
       const email = user.email ? normalizeEmail(user.email) : null;
       if (!email) {
+        logAuthDebug("callback-signin-missing-email");
         return "/sign-in?error=MissingEmail";
       }
 
@@ -524,38 +650,49 @@ export const authOptions: NextAuthOptions = {
         return "/sign-in?error=AccessDenied";
       }
 
-      const dbUser = await prisma.user.findUnique({
-        where: { email },
-      });
+      const dbUser = await withAuthTimeout("callback-signin-find-user", () =>
+        prisma.user.findUnique({
+          where: { email },
+        })
+      );
 
       if (dbUser) {
         if (dbUser.status !== "ACTIVE") {
+          logAuthDebug("callback-signin-inactive", { userId: dbUser.id });
           return "/sign-in?error=AccountDisabled";
         }
 
-        await ensureUserScaffold(dbUser.id, dbUser.email);
-
         if (account?.provider !== "credentials" && !dbUser.emailVerified) {
-          await prisma.user.update({
-            where: { id: dbUser.id },
-            data: {
-              emailVerified: new Date(),
-              image: dbUser.image ?? user.image ?? null,
-              name: dbUser.name ?? user.name ?? null,
-            },
-          });
+          await withAuthTimeout("callback-signin-update-user", () =>
+            prisma.user.update({
+              where: { id: dbUser.id },
+              data: {
+                emailVerified: new Date(),
+                image: dbUser.image ?? user.image ?? null,
+                name: dbUser.name ?? user.name ?? null,
+              },
+            })
+          );
         }
       }
 
+      logAuthDebug("callback-signin-success");
       return true;
     },
     async jwt({ token, user, trigger }) {
       const appToken = token as AppJwt;
+      logAuthDebug("callback-jwt-start", {
+        trigger: trigger ?? null,
+        hasUser: Boolean(user?.id),
+        hasSid: Boolean(appToken.sid),
+      });
 
-      if (trigger === "signIn" && user?.id) {
-        const dbUser = await prisma.user.findUnique({
-          where: { id: user.id },
-        });
+      if (user?.id) {
+        const dbUser = await withAuthTimeout("callback-jwt-find-user", () =>
+          prisma.user.findUnique({
+            where: { id: user.id },
+          })
+        );
 
         if (!dbUser || dbUser.status !== "ACTIVE") {
           throw new Error("AccountDisabled");
@@ -571,28 +708,41 @@ export const authOptions: NextAuthOptions = {
         appToken.status = dbUser.status as UserStatus;
         appToken.sid = sessionRecord.sessionToken;
         appToken.ev = dbUser.emailVerified?.toISOString() ?? null;
+        logAuthDebug("callback-jwt-signin-token-issued", {
+          userId: dbUser.id,
+          hasSid: Boolean(appToken.sid),
+        });
 
         return appToken;
       }
 
       if (!appToken.sub || !appToken.sid) {
+        logAuthDebug("callback-jwt-missing-session", {
+          hasSub: Boolean(appToken.sub),
+          hasSid: Boolean(appToken.sid),
+        });
         return appToken;
       }
 
-      const dbUser = await getDbUserForToken(appToken);
-      appToken.email = dbUser.email;
-      appToken.name = dbUser.name ?? undefined;
-      appToken.picture = dbUser.image ?? undefined;
-      appToken.role = dbUser.role as UserRole;
-      appToken.status = dbUser.status as UserStatus;
-      appToken.ev = dbUser.emailVerified?.toISOString() ?? null;
+      // Avoid a database read on every /api/auth/session and RSC request.
+      // In Workers this hot-path lookup can intermittently hang.
+      logAuthDebug("callback-jwt-reuse-token", {
+        userId: appToken.sub,
+        hasSid: Boolean(appToken.sid),
+      });
 
       return appToken;
     },
     async session({ session, token }) {
       const appToken = token as AppJwt;
+      logAuthDebug("callback-session-start", {
+        hasSessionUser: Boolean(session.user),
+        hasSub: Boolean(appToken.sub),
+        hasSid: Boolean(appToken.sid),
+      });
 
       if (!session.user || !appToken.sub || !appToken.email || !appToken.sid) {
+        logAuthDebug("callback-session-returning-unenriched");
         return session;
       }
 
@@ -602,80 +752,98 @@ export const authOptions: NextAuthOptions = {
       session.user.status = (appToken.status ?? "ACTIVE") as UserStatus;
       session.user.sessionId = appToken.sid;
       session.user.emailVerified = Boolean(appToken.ev);
+      logAuthDebug("callback-session-success", { userId: session.user.id });
 
       return session;
     },
   },
   events: {
     async signIn({ user, account, isNewUser }) {
-      const requestContext = await getAuditRequestContext();
+      logAuthDebug("event-signin-start", { userId: user.id ?? null, provider: account?.provider ?? null });
       const userId = user.id;
+      const requestContextPromise = getAuditRequestContext();
 
       if (userId) {
-        await prisma.user.update({
-          where: { id: userId },
-          data: {
-            lastLoginAt: new Date(),
-            lastSeenAt: new Date(),
-          },
-        });
+        void runAuthSideEffect("event-signin-update-user", () =>
+          prisma.user.update({
+            where: { id: userId },
+            data: {
+              lastLoginAt: new Date(),
+              lastSeenAt: new Date(),
+            },
+          }).then(() => undefined)
+        );
       }
 
-      await createAuditLog({
-        actorUserId: userId,
-        targetUserId: userId,
-        eventType: "AUTH_SIGN_IN_SUCCEEDED",
-        entityType: "User",
-        entityId: userId,
-        metadata: {
-          provider: account?.provider ?? "credentials",
-          isNewUser: Boolean(isNewUser),
-        },
-        ipAddress: requestContext.ipAddress,
-        userAgent: requestContext.userAgent,
+      void runAuthSideEffect("event-signin-audit-log", async () => {
+        const requestContext = await requestContextPromise;
+        await createAuditLog({
+          actorUserId: userId,
+          targetUserId: userId,
+          eventType: "AUTH_SIGN_IN_SUCCEEDED",
+          entityType: "User",
+          entityId: userId,
+          metadata: {
+            provider: account?.provider ?? "credentials",
+            isNewUser: Boolean(isNewUser),
+          },
+          ipAddress: requestContext.ipAddress,
+          userAgent: requestContext.userAgent,
+        }).then(() => undefined);
       });
+      logAuthDebug("event-signin-scheduled", { userId });
     },
     async signOut({ token }) {
       const appToken = token as AppJwt | undefined;
 
       if (appToken?.sid) {
-        await prisma.session.deleteMany({
-          where: { sessionToken: appToken.sid },
-        });
+        void runAuthSideEffect("event-signout-delete-session", () =>
+          prisma.session.deleteMany({
+            where: { sessionToken: appToken.sid },
+          }).then(() => undefined)
+        );
       }
 
-      await createAuditLog({
-        actorUserId: appToken?.sub,
-        targetUserId: appToken?.sub,
-        eventType: "AUTH_SIGN_OUT",
-        entityType: "Session",
-        entityId: appToken?.sid ?? null,
-      });
+      void runAuthSideEffect("event-signout-audit-log", () =>
+        createAuditLog({
+          actorUserId: appToken?.sub,
+          targetUserId: appToken?.sub,
+          eventType: "AUTH_SIGN_OUT",
+          entityType: "Session",
+          entityId: appToken?.sid ?? null,
+        }).then(() => undefined)
+      );
     },
     async createUser({ user }) {
       if (user.id && user.email) {
-        await ensureUserScaffold(user.id, normalizeEmail(user.email));
+        void runAuthSideEffect("event-create-user-scaffold", () =>
+          ensureUserScaffold(user.id!, normalizeEmail(user.email!))
+        );
       }
 
-      await createAuditLog({
-        actorUserId: user.id,
-        targetUserId: user.id,
-        eventType: "AUTH_USER_CREATED",
-        entityType: "User",
-        entityId: user.id,
-      });
+      void runAuthSideEffect("event-create-user-audit-log", () =>
+        createAuditLog({
+          actorUserId: user.id,
+          targetUserId: user.id,
+          eventType: "AUTH_USER_CREATED",
+          entityType: "User",
+          entityId: user.id,
+        }).then(() => undefined)
+      );
     },
     async linkAccount({ user, account }) {
-      await createAuditLog({
-        actorUserId: user.id,
-        targetUserId: user.id,
-        eventType: "AUTH_ACCOUNT_LINKED",
-        entityType: "Account",
-        entityId: `${account.provider}:${account.providerAccountId}`,
-        metadata: {
-          provider: account.provider,
-        },
-      });
+      void runAuthSideEffect("event-link-account-audit-log", () =>
+        createAuditLog({
+          actorUserId: user.id,
+          targetUserId: user.id,
+          eventType: "AUTH_ACCOUNT_LINKED",
+          entityType: "Account",
+          entityId: `${account.provider}:${account.providerAccountId}`,
+          metadata: {
+            provider: account.provider,
+          },
+        }).then(() => undefined)
+      );
     },
   },
 };

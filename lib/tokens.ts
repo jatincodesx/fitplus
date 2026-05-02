@@ -13,17 +13,42 @@ export const generateRawToken = () => randomBytes(TOKEN_BYTE_LENGTH).toString("h
 
 const normalizeBaseUrl = (url: string) => url.replace(/\/+$/, "");
 
+const parseBaseUrl = (value: string, source: string) => {
+  const raw = value.trim();
+
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`${source} must be a valid absolute URL.`);
+  }
+
+  if (!/^https?:$/.test(parsed.protocol)) {
+    throw new Error(`${source} must use http:// or https://.`);
+  }
+
+  if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw new Error(`${source} must contain only the origin (no path, query, or hash).`);
+  }
+
+  return normalizeBaseUrl(parsed.origin);
+};
+
 export const getBaseUrl = () => {
-  if (process.env.APP_BASE_URL) {
-    return normalizeBaseUrl(process.env.APP_BASE_URL);
+  if (process.env.APP_BASE_URL?.trim()) {
+    return parseBaseUrl(process.env.APP_BASE_URL, "APP_BASE_URL");
   }
 
-  if (process.env.NEXTAUTH_URL) {
-    return normalizeBaseUrl(process.env.NEXTAUTH_URL);
+  if (process.env.NEXTAUTH_URL?.trim()) {
+    return parseBaseUrl(process.env.NEXTAUTH_URL, "NEXTAUTH_URL");
   }
 
-  if (process.env.VERCEL_URL) {
-    return normalizeBaseUrl(`https://${process.env.VERCEL_URL}`);
+  if (process.env.VERCEL_URL?.trim()) {
+    return parseBaseUrl(`https://${process.env.VERCEL_URL}`, "VERCEL_URL");
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("APP_BASE_URL or NEXTAUTH_URL must be set in production.");
   }
 
   return "http://localhost:3000";

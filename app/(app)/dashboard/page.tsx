@@ -7,35 +7,60 @@ import { Badge } from "@/components/ui/badge";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { LineChart } from "@/components/charts/line-chart";
 import { requireCustomerAppAccess } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
-import { buildCompleteUserFitnessContext } from "@/lib/coach-context";
-import { getWorkoutPlanProgress } from "@/lib/workout-progress";
+import { getDashboardRenderData } from "@/lib/dashboard-data";
 import { formatDisplayDate } from "@/lib/utils";
 
-export default async function DashboardPage() {
-  const sessionUser = await requireCustomerAppAccess();
+function logDashboardPage(event: string, metadata?: Record<string, unknown>) {
+  if (process.env.AUTH_DEBUG !== "true") {
+    return;
+  }
 
-  const user = await prisma.user.findUnique({
-    where: { id: sessionUser.id },
-    include: {
-      goals: { orderBy: { updatedAt: "desc" }, take: 1 },
-      nutritionPlans: { orderBy: { createdAt: "desc" }, take: 1 },
-      weightLogs: { orderBy: { date: "asc" } },
-      chatMessages: { orderBy: { createdAt: "desc" }, take: 4 },
-    },
+  const payload = metadata ? ` ${JSON.stringify(metadata)}` : "";
+  console.info(`[dashboard-page] ${event}${payload}`);
+}
+
+export default async function DashboardPage() {
+  logDashboardPage("start");
+  const sessionUser = await requireCustomerAppAccess();
+  logDashboardPage("session-user", { userId: sessionUser.id, role: sessionUser.role });
+
+  logDashboardPage("render-data-start", { userId: sessionUser.id });
+  const { user, workoutProgress } = await getDashboardRenderData(sessionUser.id);
+  logDashboardPage("render-data-done", {
+    userId: sessionUser.id,
+    found: Boolean(user),
+    hasPlan: Boolean(workoutProgress.plan),
   });
 
   if (!user) {
     redirect("/sign-in");
   }
 
-  const context = await buildCompleteUserFitnessContext(user.id);
-  const workoutProgress = await getWorkoutPlanProgress(user.id);
   const latestNutrition = user.nutritionPlans[0];
   const goal = user.goals[0];
+  const weightLogs = [...user.weightLogs].reverse();
+  const recentSessions = user.workoutSessions;
+  const completedRecentSessions = recentSessions.filter((session) => session.status === "COMPLETED");
+  const completionRateLast14Days = recentSessions.length
+    ? Math.round((completedRecentSessions.length / recentSessions.length) * 100)
+    : 0;
+  const oldestWeight = weightLogs[0]?.weightKg;
+  const latestWeight = weightLogs.at(-1)?.weightKg;
+  const weightDelta =
+    oldestWeight !== undefined && latestWeight !== undefined
+      ? Math.round((latestWeight - oldestWeight) * 10) / 10
+      : undefined;
+  const quickInsight =
+    workoutProgress.plan?.summary ??
+    (completionRateLast14Days >= 80
+      ? `Coach priority this week: keep the current rhythm and use your ${latestNutrition?.calories ?? 2300} kcal target to support recovery.`
+      : goal?.type
+        ? `Coach priority this week: tighten execution around your ${goal.type.toLowerCase()} goal and avoid skipping the main lifts.`
+        : "Coach priority this week: stay consistent, hit the main lifts with intent, and keep recovery habits simple.");
+
   const weightSeries =
-    user.weightLogs.length > 0
-      ? user.weightLogs.map((entry) => ({ label: formatDisplayDate(entry.date), value: entry.weightKg }))
+    weightLogs.length > 0
+      ? weightLogs.map((entry) => ({ label: formatDisplayDate(entry.date), value: entry.weightKg }))
       : [
           { label: "Week 1", value: 82.4 },
           { label: "Week 2", value: 82.0 },
@@ -45,7 +70,6 @@ export default async function DashboardPage() {
 
   const recentMessages = [...user.chatMessages].reverse();
   const nextWorkout = workoutProgress.nextWorkout;
-  const coachInsight = workoutProgress.plan?.summary ?? context.quickInsight;
 
   return (
     <div className="space-y-6">
@@ -54,7 +78,7 @@ export default async function DashboardPage() {
           <div className="space-y-3">
             <p className="text-xs uppercase tracking-[0.2em] text-[var(--color-muted)]">Overview</p>
             <h1 className="text-3xl font-semibold">Your performance cockpit</h1>
-            <p className="max-w-3xl text-sm text-[var(--color-muted)]">{coachInsight}</p>
+            <p className="max-w-3xl text-sm text-[var(--color-muted)]">{quickInsight}</p>
             <div className="flex flex-wrap gap-2">
               <Badge>{workoutProgress.plan?.split ?? "Plan ready"}</Badge>
               <Badge variant="warning">
@@ -64,12 +88,12 @@ export default async function DashboardPage() {
           </div>
           <div className="flex flex-wrap gap-3">
             <Button asChild>
-              <Link href={nextWorkout ? `/workouts/${nextWorkout.id}` : "/workouts"}>
+              <Link href={nextWorkout ? `/workouts/${nextWorkout.id}` : "/workouts"} prefetch={false}>
                 {nextWorkout?.status === "in_progress" ? "Resume today’s workout" : "Start today’s workout"}
               </Link>
             </Button>
             <Button variant="secondary" asChild>
-              <Link href="/coach-call">Coach Chat Session</Link>
+              <Link href="/coach-call" prefetch={false}>Coach Chat Session</Link>
             </Button>
           </div>
         </div>
@@ -78,7 +102,7 @@ export default async function DashboardPage() {
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <StatCard
           title="Current goal"
-          value={goal?.type ?? context.profile.goalType ?? "Lean + strong"}
+          value={goal?.type ?? user.profile?.goalType ?? "Lean + strong"}
           subtext={goal?.notes ?? "Aligned to your latest onboarding"}
           icon={Trophy}
         />
@@ -113,21 +137,21 @@ export default async function DashboardPage() {
         <Card className="space-y-4">
           <CardHeader title="AI coach insight" description="What the system is prioritizing right now" />
           <div className="rounded-2xl border border-[var(--color-border)]/70 bg-black/20 p-4 text-sm text-[var(--color-muted)]">
-            <p className="text-base text-foreground">{context.quickInsight}</p>
+            <p className="text-base text-foreground">{quickInsight}</p>
           </div>
           <div className="space-y-2 text-sm text-[var(--color-muted)]">
             <p>
               Recent weight trend:{" "}
               <span className="font-semibold text-foreground">
-                {context.recentWeightTrend.delta !== undefined
-                  ? `${context.recentWeightTrend.delta > 0 ? "+" : ""}${context.recentWeightTrend.delta} kg`
+                {weightDelta !== undefined
+                  ? `${weightDelta > 0 ? "+" : ""}${weightDelta} kg`
                   : "Not enough data"}
               </span>
             </p>
             <p>
               Session consistency:{" "}
               <span className="font-semibold text-foreground">
-                {context.recentWorkoutProgress.completionRateLast14Days}%
+                {completionRateLast14Days}%
               </span>{" "}
               over the last 14 days
             </p>
@@ -164,7 +188,7 @@ export default async function DashboardPage() {
                       <p className="text-sm text-[var(--color-muted)]">{day.focus}</p>
                     </div>
                     <Button variant="secondary" asChild>
-                      <Link href={`/workouts/${day.id}`}>
+                      <Link href={`/workouts/${day.id}`} prefetch={false}>
                         {day.status === "in_progress" ? "Resume" : "Open"}
                       </Link>
                     </Button>
@@ -198,14 +222,14 @@ export default async function DashboardPage() {
                 </p>
                 <p>{latestNutrition.guidance ?? "Keep protein high, place carbs around training, and repeat easy meals."}</p>
                 <Button variant="secondary" asChild>
-                  <Link href="/nutrition">Open nutrition</Link>
+                  <Link href="/nutrition" prefetch={false}>Open nutrition</Link>
                 </Button>
               </div>
             ) : (
               <div className="space-y-3 text-sm text-[var(--color-muted)]">
                 <p>No nutrition target yet. Generate one from Nutrition or after a coach session.</p>
                 <Button variant="secondary" asChild>
-                  <Link href="/nutrition">Open nutrition</Link>
+                  <Link href="/nutrition" prefetch={false}>Open nutrition</Link>
                 </Button>
               </div>
             )}
@@ -242,7 +266,7 @@ export default async function DashboardPage() {
           <p className="mt-1 text-lg font-semibold">Coach chat, workouts, nutrition, and progress now share the same athlete context.</p>
         </div>
         <Button variant="secondary" asChild>
-          <Link href="/coach">Open AI coach</Link>
+          <Link href="/coach" prefetch={false}>Open AI coach</Link>
         </Button>
       </Card>
     </div>

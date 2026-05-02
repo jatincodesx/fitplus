@@ -1,28 +1,47 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { CoachChat } from "@/components/coach/chat-panel";
 import { requireCustomerAppAccess } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
-import { buildCompleteUserFitnessContext } from "@/lib/coach-context";
-import { getWorkoutPlanProgress } from "@/lib/workout-progress";
+import { getCoachPageData } from "@/lib/coach-page-data";
 
 export default async function CoachPage() {
   const sessionUser = await requireCustomerAppAccess();
-  const user = await prisma.user.findUnique({ where: { id: sessionUser.id } });
-  if (!user) {
-    redirect("/sign-in");
+  const coachPageData = await getCoachPageData(sessionUser.id).catch((error) => {
+    console.error("[coach-page-error]", {
+      label: "coach-page-data",
+      error: error instanceof Error ? error.message : "UnknownError",
+    });
+    return null;
+  });
+
+  if (!coachPageData) {
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] text-[var(--color-muted)]">AI Coach</p>
+            <h1 className="text-3xl font-semibold">Context-aware coaching</h1>
+            <p className="text-sm text-[var(--color-muted)]">
+              The coach page could not load its database context, so this route is showing an explicit error state.
+            </p>
+          </div>
+          <Button variant="secondary" asChild>
+            <Link href="/coach-call">Run a new coach session</Link>
+          </Button>
+        </div>
+
+        <Card className="border-amber-400/30 bg-amber-500/10">
+          <CardHeader title="Coach data is unavailable" description="Retry once the Worker database path is healthy again." />
+          <p className="text-sm text-amber-100">
+            This is not the same as “no messages” or “no plan”. The route data load itself failed.
+          </p>
+        </Card>
+      </div>
+    );
   }
 
-  const [messages, context, workoutProgress] = await Promise.all([
-    prisma.chatMessage.findMany({
-      where: { userId: user.id },
-      orderBy: { createdAt: "asc" },
-    }),
-    buildCompleteUserFitnessContext(user.id),
-    getWorkoutPlanProgress(user.id),
-  ]);
+  const { messages, context, workoutProgress } = coachPageData;
 
   return (
     <div className="space-y-6">

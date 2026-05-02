@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { signOut, useSession } from "next-auth/react";
+import { signOut } from "next-auth/react";
 import { usePathname } from "next/navigation";
 import {
   Brain,
@@ -50,17 +50,25 @@ export type AppShellSummary = {
   ctaLabel: string;
 };
 
+type AppShellViewer = {
+  name?: string | null;
+  email: string;
+  image?: string | null;
+  role: string;
+};
+
 export function AppShell({
   children,
+  viewer,
   shellSummary,
   needsEmailVerification = false,
 }: {
   children: React.ReactNode;
+  viewer: AppShellViewer;
   shellSummary?: AppShellSummary;
   needsEmailVerification?: boolean;
 }) {
   const pathname = usePathname();
-  const session = useSession();
 
   const activeMeta =
     Object.entries(routeMeta).find(([href]) => pathname.startsWith(href))?.[1] ??
@@ -86,6 +94,7 @@ export function AppShell({
               <Link
                 key={link.href}
                 href={link.href}
+                prefetch={false}
                 className={cn(
                   "flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition hover:bg-white/5",
                   active && "bg-white/10 text-white"
@@ -107,7 +116,7 @@ export function AppShell({
             {shellSummary?.detail ?? "Adaptive training is ready once your profile and first plan are in place."}
           </p>
           <Button variant="secondary" size="sm" className="mt-4 w-full" asChild>
-            <Link href={shellSummary?.ctaHref ?? "/onboarding"}>
+            <Link href={shellSummary?.ctaHref ?? "/onboarding"} prefetch={false}>
               {shellSummary?.ctaLabel ?? "Edit onboarding"}
             </Link>
           </Button>
@@ -123,9 +132,10 @@ export function AppShell({
 
           <div className="flex items-center gap-3">
             <ThemeToggle />
-            {session.data?.user?.role === "SUPERADMIN" ? (
+            {viewer.role === "SUPERADMIN" ? (
               <Link
                 href="/superadmin"
+                prefetch={false}
                 className="hidden items-center gap-2 rounded-full border border-[var(--color-border)] px-3 py-2 text-sm font-semibold text-[var(--color-accent-2)] lg:flex"
               >
                 Platform console
@@ -133,15 +143,16 @@ export function AppShell({
             ) : null}
             <Link
               href="/coach"
+              prefetch={false}
               className="hidden items-center gap-2 rounded-full border border-[var(--color-border)] px-3 py-2 text-sm font-semibold text-[var(--color-accent)] md:flex"
             >
               <MessageCircle className="h-4 w-4" /> Ask coach
             </Link>
             <div className="flex items-center gap-2 rounded-full border border-[var(--color-border)] px-3 py-2">
-              <Avatar src={session.data?.user?.image} name={session.data?.user?.name} className="h-8 w-8" />
+              <Avatar src={viewer.image} name={viewer.name} className="h-8 w-8" />
               <div className="hidden text-left text-sm md:block">
-                <p className="font-semibold leading-tight">{session.data?.user?.name ?? "Athlete"}</p>
-                <p className="text-[11px] text-[var(--color-muted)]">{session.data?.user?.email}</p>
+                <p className="font-semibold leading-tight">{viewer.name ?? "Athlete"}</p>
+                <p className="text-[11px] text-[var(--color-muted)]">{viewer.email}</p>
               </div>
               <button
                 onClick={() => signOut({ callbackUrl: "/" })}
@@ -158,7 +169,7 @@ export function AppShell({
           <div className="border-b border-amber-400/20 bg-amber-500/10 px-6 py-3 text-sm text-amber-100">
             Email verification is still pending. Some security actions may stay limited until you verify your address.
             {" "}
-            <Link href="/profile" className="font-semibold underline underline-offset-4">
+            <Link href="/profile" prefetch={false} className="font-semibold underline underline-offset-4">
               Open account settings
             </Link>
           </div>

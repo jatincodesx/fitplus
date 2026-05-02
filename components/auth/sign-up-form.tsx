@@ -2,18 +2,41 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { OAuthProviderButton } from "@/components/auth/oauth-provider-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+
+const AUTH_REQUEST_TIMEOUT_MS = 15000;
+
+function authDebug(event: string, metadata?: Record<string, unknown>) {
+  const payload = metadata ? ` ${JSON.stringify(metadata)}` : "";
+  console.info(`[auth-ui] ${event}${payload}`);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string) {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      })
+      .catch((error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
+}
 
 export function SignUpForm({
   providers,
 }: {
   providers: { google: boolean; apple: boolean };
 }) {
-  const router = useRouter();
   const [form, setForm] = useState({ name: "", email: "", password: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -39,43 +62,108 @@ export function SignUpForm({
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (loading) {
+      return;
+    }
+
     setLoading(true);
     setError("");
+    authDebug("sign-up-submit-start");
 
-    const response = await fetch("/api/auth/signup", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
-    });
-    const data = await response.json();
+    try {
+      const response = await withTimeout(
+        fetch("/api/auth/signup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(form),
+        }),
+        AUTH_REQUEST_TIMEOUT_MS,
+        "Sign-up request timed out. Please try again."
+      );
+      const data = (await response.json()) as { error?: string };
 
-    if (!response.ok) {
+      authDebug("sign-up-submit-response", {
+        status: response.status,
+        ok: response.ok,
+      });
+
+      if (!response.ok) {
+        setError(data.error ?? "Could not create account.");
+        return;
+      }
+
+      const signInResponse = await withTimeout(
+        signIn("credentials", {
+          redirect: false,
+          email: form.email,
+          password: form.password,
+          callbackUrl: "/onboarding",
+        }),
+        AUTH_REQUEST_TIMEOUT_MS,
+        "Account created, but sign-in timed out. Please sign in manually."
+      );
+
+      authDebug("sign-up-auto-sign-in-response", {
+        hasResult: Boolean(signInResponse),
+        hasError: Boolean(signInResponse?.error),
+        hasUrl: Boolean(signInResponse?.url),
+      });
+
+      if (!signInResponse) {
+        setError("Account created, but sign-in did not return a response. Please sign in manually.");
+        return;
+      }
+
+      if (signInResponse.error) {
+        setError("Account created, but automatic sign-in failed. Please sign in manually.");
+        return;
+      }
+
+      const targetUrl = signInResponse.url ?? "/onboarding";
+      authDebug("sign-up-success", { targetUrl });
+      authDebug("sign-up-navigate", { targetUrl });
+      window.location.replace(targetUrl);
+    } catch (error) {
+      authDebug("sign-up-submit-failure", {
+        error: error instanceof Error ? error.message : "UnknownError",
+      });
+      setError(
+        error instanceof Error && error.message
+          ? error.message
+          : "Could not create account. Please try again."
+      );
+    } finally {
       setLoading(false);
-      setError(data.error ?? "Could not create account.");
-      return;
     }
-
-    const signInResponse = await signIn("credentials", {
-      redirect: false,
-      email: form.email,
-      password: form.password,
-      callbackUrl: "/onboarding",
-    });
-
-    setLoading(false);
-
-    if (signInResponse?.error) {
-      setError("Account created, but automatic sign-in failed. Please sign in manually.");
-      return;
-    }
-
-    router.push(signInResponse?.url ?? "/onboarding");
-    router.refresh();
   };
 
   const handleOAuth = async (provider: "google" | "apple") => {
+    if (loading) {
+      return;
+    }
+
     setLoading(true);
-    await signIn(provider, { callbackUrl: "/auth/complete" });
+    setError("");
+    authDebug("oauth-sign-up-start", { provider });
+
+    try {
+      await withTimeout(
+        signIn(provider, { callbackUrl: "/auth/complete" }),
+        AUTH_REQUEST_TIMEOUT_MS,
+        "The provider sign-up request timed out. Please try again."
+      );
+    } catch (error) {
+      authDebug("oauth-sign-up-failure", {
+        provider,
+        error: error instanceof Error ? error.message : "UnknownError",
+      });
+      setError(
+        error instanceof Error && error.message
+          ? error.message
+          : "Could not start provider sign-up. Please try again."
+      );
+      setLoading(false);
+    }
   };
 
   return (
@@ -138,7 +226,7 @@ export function SignUpForm({
       <div className="space-y-3 text-sm text-slate-300">
         <p>
           Already have an account?{" "}
-          <Link href="/sign-in" className="font-semibold text-cyan-300 hover:underline">
+          <Link href="/sign-in" prefetch={false} className="font-semibold text-cyan-300 hover:underline">
             Sign in
           </Link>
         </p>

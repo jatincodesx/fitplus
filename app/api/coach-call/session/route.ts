@@ -1,29 +1,36 @@
 import { requireApiCustomerAppAccess } from "@/lib/auth";
 import { apiOk, ApiError, handleApiError } from "@/lib/api";
 import { createAuditLog, getAuditRequestContext } from "@/lib/audit";
-import { prisma } from "@/lib/prisma";
+import {
+  createCoachCallSession,
+  getCoachCallSession,
+  getLatestCoachCallSession,
+} from "@/lib/coach-call-session-data";
 
 export async function POST() {
   try {
     const sessionUser = await requireApiCustomerAppAccess();
 
-    const call = await prisma.coachCallSession.create({
-      data: {
-        userId: sessionUser.id,
-        status: "CONNECTING",
-      },
-    });
+    const call = await createCoachCallSession(sessionUser.id);
 
-    const requestContext = await getAuditRequestContext();
-    await createAuditLog({
-      actorUserId: sessionUser.id,
-      targetUserId: sessionUser.id,
-      eventType: "COACH_CALL_SESSION_STARTED",
-      entityType: "CoachCallSession",
-      entityId: call.id,
-      ipAddress: requestContext.ipAddress,
-      userAgent: requestContext.userAgent,
-    });
+    void getAuditRequestContext()
+      .then((requestContext) =>
+        createAuditLog({
+          actorUserId: sessionUser.id,
+          targetUserId: sessionUser.id,
+          eventType: "COACH_CALL_SESSION_STARTED",
+          entityType: "CoachCallSession",
+          entityId: call.id,
+          ipAddress: requestContext.ipAddress,
+          userAgent: requestContext.userAgent,
+        })
+      )
+      .catch((error) => {
+        console.error("[coach-call-session-error]", {
+          label: "audit-log",
+          error: error instanceof Error ? error.message : "UnknownError",
+        });
+      });
 
     return apiOk({ sessionId: call.id });
   } catch (error) {
@@ -40,11 +47,7 @@ export async function GET(req: Request) {
     const sessionUser = await requireApiCustomerAppAccess();
 
     if (latest === "1") {
-      const call = await prisma.coachCallSession.findFirst({
-        where: { userId: sessionUser.id },
-        orderBy: { createdAt: "desc" },
-        include: { transcripts: { orderBy: { timestamp: "asc" } }, intake: true, planLog: true },
-      });
+      const call = await getLatestCoachCallSession(sessionUser.id);
 
       if (!call) {
         return apiOk({ sessionId: null, transcripts: [] });
@@ -57,10 +60,7 @@ export async function GET(req: Request) {
       throw new ApiError(400, "sessionId required");
     }
 
-    const call = await prisma.coachCallSession.findFirst({
-      where: { id: sessionParam, userId: sessionUser.id },
-      include: { transcripts: { orderBy: { timestamp: "asc" } }, intake: true, planLog: true },
-    });
+    const call = await getCoachCallSession(sessionUser.id, sessionParam);
 
     if (!call) {
       throw new ApiError(404, "Session not found.");

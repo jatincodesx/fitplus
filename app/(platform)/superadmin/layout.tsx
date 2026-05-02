@@ -17,11 +17,12 @@ const routeMeta = {
 };
 
 export default async function SuperAdminLayout({ children }: { children: React.ReactNode }) {
-  await requireSuperAdmin();
+  const sessionUser = await requireSuperAdmin();
   const summary = await getSuperAdminConsoleSummary();
 
   return (
     <InternalShell
+      viewer={sessionUser}
       navLinks={navLinks}
       routeMeta={routeMeta}
       areaLabel="Founder control"

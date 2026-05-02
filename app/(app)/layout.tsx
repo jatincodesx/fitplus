@@ -1,42 +1,37 @@
 import { ReactNode } from "react";
 import { AppShell, type AppShellSummary } from "@/components/layout/app-shell";
 import { requireCustomerAppAccess } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
-import { getWorkoutPlanProgress } from "@/lib/workout-progress";
+
+function logDashboardLayout(event: string, metadata?: Record<string, unknown>) {
+  if (process.env.AUTH_DEBUG !== "true") {
+    return;
+  }
+
+  const payload = metadata ? ` ${JSON.stringify(metadata)}` : "";
+  console.info(`[dashboard-layout] ${event}${payload}`);
+}
 
 export default async function AppLayout({ children }: { children: ReactNode }) {
+  logDashboardLayout("start");
   const sessionUser = await requireCustomerAppAccess();
-  let shellSummary: AppShellSummary | undefined;
-
-  const user = await prisma.user.findUnique({
-    where: { id: sessionUser.id },
-    include: { profile: true },
-  });
-
-  if (user) {
-    const workoutProgress = await getWorkoutPlanProgress(user.id);
-    const nextWorkout = workoutProgress.nextWorkout;
-
-    shellSummary = {
-      title:
-        nextWorkout?.name ??
-        workoutProgress.plan?.split ??
-        user.profile?.currentGoal ??
-        "Consistency + Recovery",
-      detail: workoutProgress.plan
-        ? `${workoutProgress.completedDays}/${workoutProgress.totalDays} workout days complete this week`
-        : "Generate a plan to activate live coaching and workout execution.",
-      ctaHref: nextWorkout ? `/workouts/${nextWorkout.id}` : "/onboarding",
-      ctaLabel: nextWorkout
-        ? nextWorkout.status === "in_progress"
-          ? "Resume session"
-          : "Start next workout"
-        : "Edit onboarding",
-    };
-  }
+  logDashboardLayout("session-user", { userId: sessionUser.id, role: sessionUser.role });
+  const shellSummary: AppShellSummary = sessionUser.emailVerified
+    ? {
+        title: sessionUser.name ?? "Consistency + Recovery",
+        detail: "Pick your next move across dashboard, profile, workouts, nutrition, coach, and billing.",
+        ctaHref: "/dashboard",
+        ctaLabel: "Open dashboard",
+      }
+    : {
+        title: "Verify your account",
+        detail: "Email verification is still pending, so security-sensitive account actions may stay limited until you confirm your address.",
+        ctaHref: "/profile",
+        ctaLabel: "Review account",
+      };
 
   return (
     <AppShell
+      viewer={sessionUser}
       shellSummary={shellSummary}
       needsEmailVerification={!sessionUser.emailVerified}
     >

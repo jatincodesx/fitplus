@@ -4,29 +4,113 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
 import { AccountSettingsPanels } from "@/components/account/account-settings-panels";
 import { getAvailableAuthProviders, requireCustomerAppAccess } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
-import { getWorkoutPlanProgress } from "@/lib/workout-progress";
+import { getProfileRenderData } from "@/lib/profile-data";
+
+function logProfilePage(event: string, metadata?: Record<string, unknown>) {
+  if (process.env.AUTH_DEBUG !== "true") {
+    return;
+  }
+
+  const payload = metadata ? ` ${JSON.stringify(metadata)}` : "";
+  console.info(`[profile-page] ${event}${payload}`);
+}
 
 export default async function ProfilePage() {
+  logProfilePage("start");
   const sessionUser = await requireCustomerAppAccess();
+  logProfilePage("session-user", { userId: sessionUser.id, role: sessionUser.role });
 
-  const user = await prisma.user.findUnique({
-    where: { id: sessionUser.id },
-    include: {
-      profile: true,
-      subscription: true,
-      billingProfile: true,
-      accounts: { orderBy: { provider: "asc" } },
-      sessions: { orderBy: { updatedAt: "desc" } },
-    },
-  });
+  logProfilePage("render-data-start", { userId: sessionUser.id });
+  let user: Awaited<ReturnType<typeof getProfileRenderData>>["user"] = null;
+  let workoutSummary: Awaited<ReturnType<typeof getProfileRenderData>>["workoutSummary"] = {
+    plan: null,
+    completedDays: 0,
+    totalDays: 0,
+    nextWorkout: null,
+  };
+  let loadFailed = false;
 
-  if (!user) {
+  try {
+    const data = await getProfileRenderData(sessionUser.id);
+    user = data.user;
+    workoutSummary = data.workoutSummary;
+    logProfilePage("render-data-done", {
+      userId: sessionUser.id,
+      found: Boolean(user),
+      hasPlan: Boolean(workoutSummary.plan),
+    });
+  } catch (error) {
+    loadFailed = true;
+    console.error("[profile-page-error]", {
+      userId: sessionUser.id,
+      error: error instanceof Error ? error.message : "UnknownError",
+    });
+  }
+
+  if (!user && !loadFailed) {
     redirect("/sign-in");
   }
 
-  const workoutProgress = await getWorkoutPlanProgress(user.id);
   const availableProviders = getAvailableAuthProviders();
+
+  if (loadFailed || !user) {
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] text-[var(--color-muted)]">Profile</p>
+            <h1 className="text-3xl font-semibold">Your training profile</h1>
+            <p className="text-sm text-[var(--color-muted)]">
+              Keep your body metrics, schedule, and constraints sharp so coaching and generation stay credible.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" asChild>
+              <Link href="/onboarding" prefetch={false}>Edit onboarding</Link>
+            </Button>
+            <Button asChild>
+              <Link href="/coach-call" prefetch={false}>Run coach session</Link>
+            </Button>
+          </div>
+        </div>
+
+        <Card className="border-amber-400/30 bg-amber-500/10">
+          <CardHeader title="Profile data could not load" description="The rest of the app is still available." />
+          <p className="text-sm text-amber-100">
+            Refresh this page to retry. If the problem persists, use onboarding or coach chat to keep working.
+          </p>
+        </Card>
+
+        <div className="grid gap-4 xl:grid-cols-3">
+          <Card>
+            <CardHeader title="Account" description="Fallback session state" />
+            <div className="space-y-2 text-sm text-[var(--color-muted)]">
+              <p><span className="font-semibold text-foreground">Name:</span> {sessionUser.name ?? "Athlete"}</p>
+              <p><span className="font-semibold text-foreground">Email:</span> {sessionUser.email}</p>
+              <p><span className="font-semibold text-foreground">Role:</span> {sessionUser.role}</p>
+              <p><span className="font-semibold text-foreground">Verification:</span> {sessionUser.emailVerified ? "Verified" : "Pending"}</p>
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader title="Training profile" description="Temporary fallback state" />
+            <p className="text-sm text-[var(--color-muted)]">
+              Detailed profile data is temporarily unavailable.
+            </p>
+          </Card>
+
+          <Card>
+            <CardHeader title="Connected providers" description="Available sign-in methods" />
+            <div className="space-y-2 text-sm text-[var(--color-muted)]">
+              <p><span className="font-semibold text-foreground">Password:</span> Available</p>
+              <p><span className="font-semibold text-foreground">Google:</span> {availableProviders.google ? "Available" : "Not configured"}</p>
+              <p><span className="font-semibold text-foreground">Apple:</span> {availableProviders.apple ? "Available" : "Not configured"}</p>
+            </div>
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -40,10 +124,10 @@ export default async function ProfilePage() {
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="secondary" asChild>
-            <Link href="/onboarding">Edit onboarding</Link>
+            <Link href="/onboarding" prefetch={false}>Edit onboarding</Link>
           </Button>
           <Button asChild>
-            <Link href="/coach-call">Run coach session</Link>
+            <Link href="/coach-call" prefetch={false}>Run coach session</Link>
           </Button>
         </div>
       </div>
@@ -80,7 +164,7 @@ export default async function ProfilePage() {
             <p><span className="font-semibold text-foreground">Tier:</span> {user.subscription?.planTier ?? "STARTER"}</p>
             <p>
               <span className="font-semibold text-foreground">Next workout:</span>{" "}
-              {workoutProgress.nextWorkout?.name ?? "No active plan"}
+              {workoutSummary.nextWorkout?.name ?? "No active plan"}
             </p>
           </div>
         </Card>
@@ -110,23 +194,23 @@ export default async function ProfilePage() {
       <Card>
         <CardHeader
           title="Connected plan state"
-          description={workoutProgress.plan?.title ?? "No active workout plan"}
+          description={workoutSummary.plan?.title ?? "No active workout plan"}
         />
-        {workoutProgress.plan ? (
+        {workoutSummary.plan ? (
           <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
             <div className="space-y-3 text-sm text-[var(--color-muted)]">
-              <p>{workoutProgress.plan.summary}</p>
+              <p>{workoutSummary.plan.summary}</p>
               <p>
                 <span className="font-semibold text-foreground">Weekly completion:</span>{" "}
-                {workoutProgress.completedDays}/{workoutProgress.totalDays} days complete
+                {workoutSummary.completedDays}/{workoutSummary.totalDays} days complete
               </p>
               <p>
                 <span className="font-semibold text-foreground">Current split:</span>{" "}
-                {workoutProgress.plan.split ?? "Structured weekly plan"}
+                {workoutSummary.plan.split ?? "Structured weekly plan"}
               </p>
             </div>
             <div className="space-y-2">
-              {workoutProgress.plan.days.slice(0, 3).map((day) => (
+              {workoutSummary.plan.days.map((day) => (
                 <div
                   key={day.id}
                   className="rounded-2xl border border-[var(--color-border)]/70 bg-black/20 p-3 text-sm text-[var(--color-muted)]"

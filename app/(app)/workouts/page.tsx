@@ -1,22 +1,60 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { GeneratePlanButton } from "@/components/workouts/generate-plan-button";
 import { WorkoutDayCard } from "@/components/workouts/workout-day-card";
 import { requireCustomerAppAccess } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
-import { getWorkoutPlanProgress } from "@/lib/workout-progress";
+import { getWorkoutsPageData } from "@/lib/workouts-data";
 import { Dumbbell, Sparkles } from "lucide-react";
 
 export default async function WorkoutsPage() {
   const sessionUser = await requireCustomerAppAccess();
-  const user = await prisma.user.findUnique({ where: { id: sessionUser.id } });
-  if (!user) {
-    redirect("/sign-in");
+  let loadFailed = false;
+  let workoutProgress: Awaited<ReturnType<typeof getWorkoutsPageData>> = {
+    plan: null,
+    weeklyCompletionPercent: 0,
+    completedDays: 0,
+    totalDays: 0,
+    nextWorkout: undefined,
+  };
+
+  try {
+    workoutProgress = await getWorkoutsPageData(sessionUser.id);
+  } catch (error) {
+    loadFailed = true;
+    console.error("[workouts-page-error]", {
+      label: "workout-progress-query",
+      error: error instanceof Error ? error.message : "UnknownError",
+    });
   }
 
-  const workoutProgress = await getWorkoutPlanProgress(user.id);
+  if (loadFailed) {
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] text-[var(--color-muted)]">Planner</p>
+            <h1 className="text-3xl font-semibold">Workout planner</h1>
+            <p className="text-sm text-[var(--color-muted)]">
+              Workout data is temporarily unavailable because the Worker could not complete the feature query.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <GeneratePlanButton />
+            <Button variant="secondary" asChild>
+              <Link href="/coach-call">Coach Chat Session</Link>
+            </Button>
+          </div>
+        </div>
+
+        <Card className="border-amber-400/30 bg-amber-500/10">
+          <p className="text-sm text-amber-100">
+            Refresh this page to retry. Do not treat this state as “no workout plan”; the load itself failed.
+          </p>
+        </Card>
+      </div>
+    );
+  }
 
   if (!workoutProgress.plan) {
     return (

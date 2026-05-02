@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { OAuthProviderButton } from "@/components/auth/oauth-provider-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+
+const AUTH_REQUEST_TIMEOUT_MS = 15000;
 
 const authErrorMessages: Record<string, string> = {
   CredentialsSignin: "Invalid email or password.",
@@ -22,6 +23,29 @@ const noticeMessages: Record<string, string> = {
   emailVerified: "Your email is now verified.",
 };
 
+function authDebug(event: string, metadata?: Record<string, unknown>) {
+  const payload = metadata ? ` ${JSON.stringify(metadata)}` : "";
+  console.info(`[auth-ui] ${event}${payload}`);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string) {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      })
+      .catch((error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
+}
+
 export function SignInForm({
   initialEmail = "",
   initialError,
@@ -35,7 +59,6 @@ export function SignInForm({
   callbackUrl: string;
   providers: { google: boolean; apple: boolean };
 }) {
-  const router = useRouter();
   const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState("");
   const [error, setError] = useState(
@@ -60,30 +83,86 @@ export function SignInForm({
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    setLoading(true);
-    setError("");
-
-    const result = await signIn("credentials", {
-      redirect: false,
-      email,
-      password,
-      callbackUrl,
-    });
-
-    setLoading(false);
-
-    if (result?.error) {
-      setError(authErrorMessages[result.error] ?? "Could not sign in. Please try again.");
+    if (loading) {
       return;
     }
 
-    router.push(result?.url ?? callbackUrl);
-    router.refresh();
+    setLoading(true);
+    setError("");
+    authDebug("sign-in-submit-start", { callbackUrl });
+
+    try {
+      const result = await withTimeout(
+        signIn("credentials", {
+          redirect: false,
+          email,
+          password,
+          callbackUrl,
+        }),
+        AUTH_REQUEST_TIMEOUT_MS,
+        "Sign-in request timed out. Please try again."
+      );
+
+      authDebug("sign-in-submit-response", {
+        hasResult: Boolean(result),
+        hasError: Boolean(result?.error),
+        hasUrl: Boolean(result?.url),
+      });
+
+      if (!result) {
+        throw new Error("No response from authentication service.");
+      }
+
+      if (result.error) {
+        setError(authErrorMessages[result.error] ?? "Could not sign in. Please try again.");
+        return;
+      }
+
+      const targetUrl = result.url ?? callbackUrl;
+      authDebug("sign-in-submit-success", { targetUrl });
+      authDebug("sign-in-navigate", { targetUrl });
+      window.location.replace(targetUrl);
+    } catch (error) {
+      authDebug("sign-in-submit-failure", {
+        error: error instanceof Error ? error.message : "UnknownError",
+      });
+      setError(
+        error instanceof Error && error.message
+          ? error.message
+          : "Could not sign in. Please try again."
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleOAuth = async (provider: "google" | "apple") => {
+    if (loading) {
+      return;
+    }
+
     setLoading(true);
-    await signIn(provider, { callbackUrl });
+    setError("");
+    authDebug("oauth-sign-in-start", { provider, callbackUrl });
+
+    try {
+      await withTimeout(
+        signIn(provider, { callbackUrl }),
+        AUTH_REQUEST_TIMEOUT_MS,
+        "The provider sign-in request timed out. Please try again."
+      );
+    } catch (error) {
+      authDebug("oauth-sign-in-failure", {
+        provider,
+        error: error instanceof Error ? error.message : "UnknownError",
+      });
+      setError(
+        error instanceof Error && error.message
+          ? error.message
+          : "Could not start provider sign-in. Please try again."
+      );
+      setLoading(false);
+    }
   };
 
   return (
@@ -115,7 +194,7 @@ export function SignInForm({
         <div>
           <div className="mb-1 flex items-center justify-between">
             <label className="block text-sm text-slate-300">Password</label>
-            <Link href="/forgot-password" className="text-xs text-cyan-300 hover:underline">
+            <Link href="/forgot-password" prefetch={false} className="text-xs text-cyan-300 hover:underline">
               Forgot password?
             </Link>
           </div>
@@ -146,7 +225,7 @@ export function SignInForm({
       <div className="space-y-3 text-sm text-slate-300">
         <p>
           New here?{" "}
-          <Link href="/sign-up" className="font-semibold text-cyan-300 hover:underline">
+          <Link href="/sign-up" prefetch={false} className="font-semibold text-cyan-300 hover:underline">
             Create an account
           </Link>
         </p>

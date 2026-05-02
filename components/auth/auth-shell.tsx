@@ -20,7 +20,7 @@ export function AuthShell({
       <div className="relative mx-auto grid min-h-[calc(100vh-4rem)] max-w-6xl overflow-hidden rounded-[32px] border border-white/10 bg-slate-950/80 shadow-[0_40px_120px_rgba(2,6,23,0.55)] backdrop-blur xl:grid-cols-[1.08fr_0.92fr]">
         <section className="hidden flex-col justify-between border-r border-white/10 bg-[linear-gradient(160deg,rgba(15,23,42,0.94),rgba(8,15,32,0.98))] p-10 xl:flex">
           <div className="space-y-8">
-            <Link href="/" className="inline-flex items-center gap-3">
+            <Link href="/" prefetch={false} className="inline-flex items-center gap-3">
               <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-400 via-sky-500 to-indigo-500 text-sm font-black text-white">
                 FP
               </div>

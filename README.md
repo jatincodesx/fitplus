@@ -12,7 +12,7 @@ Premium full-stack fitness MVP built with Next.js (App Router), TypeScript, Tail
 ## Tech Stack
 - Next.js 16 (App Router) + React 19 + TypeScript
 - Tailwind CSS v4
-- Prisma + SQLite (swap to Postgres later)
+- Prisma + Supabase Postgres
 - NextAuth (credentials + optional Google)
 - React Query, Zod, Recharts, Radix primitives
 - AI provider layer (Ollama-first, provider switchable via env)
@@ -26,7 +26,7 @@ Premium full-stack fitness MVP built with Next.js (App Router), TypeScript, Tail
 
 ## Prerequisites
 - Node 20.9+ and npm
-- SQLite (bundled) for local dev; Postgres can be enabled by changing the Prisma datasource/provider.
+- Supabase Postgres project (or any PostgreSQL database). For Supabase + Workers, use a pooled runtime `DATABASE_URL` and a direct `DIRECT_URL` for Prisma CLI commands.
 - Optional: [Ollama](https://ollama.com) running locally for AI features (`ollama serve` and `ollama pull llama3.2`).
 
 ## Setup (Local)
@@ -42,14 +42,19 @@ cp .env.example .env
 ```
 Do not commit `.env` files; keep real secrets local or in deployment secret managers.
 
-3) Database (SQLite default)  
-- To sync schema non-interactively (required after schema changes):  
+3) Database (Supabase Postgres)
+- Set `DATABASE_URL` in `.env` to the Supabase transaction pooler string for runtime queries, and set `DIRECT_URL` to the direct database string for Prisma CLI commands:
 ```bash
-npx prisma db push --accept-data-loss
+DATABASE_URL="postgresql://prisma.<project-ref>:<password>@<region>.pooler.supabase.com:6543/postgres?pgbouncer=true&schema=public"
+DIRECT_URL="postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres?schema=public"
 ```
-- To create migrations interactively (recommended on your machine):  
+- Sync schema non-interactively (safe bootstrap path for the current repo baseline):
 ```bash
-npx prisma migrate dev --name init
+npx prisma db push
+```
+- Generate Prisma client:
+```bash
+npx prisma generate
 ```
 
 4) Seed demo data (creates the demo user, plans, logs)  
@@ -97,6 +102,8 @@ If Ollama isn’t running, API routes fall back to curated demo content and surf
 - `npm run dev` – start dev server
 - `npm run build && npm start` – production build
 - `npm run db:generate` – regenerate Prisma client
+- `npm run db:push` – push Prisma schema directly to the configured database
+- `npm run db:deploy` – apply committed Prisma migrations
 - `npm run db:seed` – seed demo data
 - `npx prisma studio` – browse the DB UI
 - `npm run mobile:dev` – run Expo mobile app
@@ -119,13 +126,20 @@ If Ollama isn’t running, API routes fall back to curated demo content and surf
 - **Billing**: mock current plan/state, ready to wire to Stripe.
 - **Profile**: account + subscription snapshot with link to onboarding edits.
 
-## Switching to Postgres Later
-1. Update `datasource` provider and `DATABASE_URL` in `prisma/schema.prisma` and `.env`.  
-2. Run `npx prisma migrate dev` against Postgres.  
-3. Reseed with `npm run db:seed` (adjust seed data as needed).
+## Database Notes
+The repository now targets PostgreSQL in Prisma (`provider = "postgresql"`).
+For Supabase on Cloudflare Workers, use the Supavisor transaction pooler for `DATABASE_URL` and keep a direct `DIRECT_URL` for Prisma CLI workflows.
+
+Because the original migration history was SQLite-based, the safest path from this repo state is:
+1. `npx prisma generate`
+2. `npx prisma db push`
+3. `npm run db:seed` (optional demo data)
 
 ## Notes
 - Tailwind v4 uses CSS-in-CSS tokens in `app/globals.css`; design tokens live there.
 - The AI layer lives in `lib/ai.ts`; API routes call it and handle fallbacks gracefully.
 - UI components live under `components/ui` and app shells under `components/layout`.
 - Demo data is safe to remove; replace with your production flows as you wire Stripe/email/etc.
+
+## Production Deployment (Cloudflare Workers)
+Use the production launch runbook: `docs/deployment-cloudflare-workers.md`.

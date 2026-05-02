@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { CoachIntake, aiProvider } from "./ai";
 import { buildCompleteUserFitnessContext } from "./coach-context";
 import { generateAdvancedNutritionGuidance, generateAdvancedWorkoutWeek } from "./fitness-generation";

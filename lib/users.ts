@@ -10,38 +10,38 @@ export const DEFAULT_PROFILE_GOAL = "Build a stronger, leaner body";
 export const normalizeEmail = (email: string) => email.trim().toLowerCase();
 
 export async function ensureUserScaffold(userId: string, email: string) {
-  await prisma.$transaction([
-    prisma.profile.upsert({
-      where: { userId },
-      create: {
-        userId,
-        currentGoal: DEFAULT_PROFILE_GOAL,
-      },
-      update: {},
-    }),
-    prisma.subscription.upsert({
-      where: { userId },
-      create: {
-        userId,
-        plan: "Starter",
-        planTier: "STARTER",
-        status: "ACTIVE",
-        provider: "NONE",
-      },
-      update: {},
-    }),
-    prisma.billingProfile.upsert({
-      where: { userId },
-      create: {
-        userId,
-        provider: "NONE",
-        billingEmail: email,
-      },
-      update: {
-        billingEmail: email,
-      },
-    }),
-  ]);
+  await prisma.profile.upsert({
+    where: { userId },
+    create: {
+      userId,
+      currentGoal: DEFAULT_PROFILE_GOAL,
+    },
+    update: {},
+  });
+
+  await prisma.subscription.upsert({
+    where: { userId },
+    create: {
+      userId,
+      plan: "Starter",
+      planTier: "STARTER",
+      status: "ACTIVE",
+      provider: "NONE",
+    },
+    update: {},
+  });
+
+  await prisma.billingProfile.upsert({
+    where: { userId },
+    create: {
+      userId,
+      provider: "NONE",
+      billingEmail: email,
+    },
+    update: {
+      billingEmail: email,
+    },
+  });
 }
 
 type CreatePasswordUserInput = {

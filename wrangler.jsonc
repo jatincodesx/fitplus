@@ -1,0 +1,44 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "main": ".open-next/worker.js",
+  "name": "fitplus-app",
+  "compatibility_date": "2026-04-19",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "vars": {
+    "NEXTAUTH_URL": "https://fitplus-app.jatin-a2c.workers.dev",
+    "APP_BASE_URL": "https://fitplus-app.jatin-a2c.workers.dev",
+    "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY": "pk_test_...",
+    "STRIPE_PRICE_PRO": "price_...",
+    "STRIPE_PRICE_ENTERPRISE": "price_...",
+    "EMAIL_PROVIDER": "resend",
+    "EMAIL_FROM": "FitPlus <no-reply@updates.lumoxtech.com.au>",
+    "AUTH_DEBUG": "false"
+  },
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "fitplus-app"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "NEXT_INC_CACHE_R2_BUCKET",
+      "bucket_name": "fitplus-app-opennext-cache"
+    },
+    {
+      "binding": "fitplus_app_opennext_cache",
+      "bucket_name": "fitplus-app-opennext-cache",
+      "remote": true
+    }
+  ],
+  "images": {
+    "binding": "IMAGES"
+  }
+}

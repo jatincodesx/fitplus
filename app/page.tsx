@@ -61,7 +61,7 @@ export default function Home() {
                 <Link href="/sign-up">Create your account</Link>
               </Button>
               <Button variant="secondary" size="lg" asChild>
-                <Link href="/dashboard">Launch demo dashboard</Link>
+                <Link href="/dashboard" prefetch={false}>Launch demo dashboard</Link>
               </Button>
             </div>
             <div className="flex flex-wrap gap-4 text-sm text-[var(--color-muted)]">

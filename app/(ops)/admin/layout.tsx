@@ -31,6 +31,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
 
   return (
     <InternalShell
+      viewer={sessionUser}
       navLinks={navLinks}
       routeMeta={routeMeta}
       areaLabel="Internal operations"

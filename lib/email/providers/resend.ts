@@ -7,6 +7,7 @@ import type {
 } from "@/lib/email/types";
 
 const RESEND_ENDPOINT = "https://api.resend.com/emails";
+const RESEND_TIMEOUT_MS = Number(process.env.RESEND_TIMEOUT_MS ?? "10000");
 
 const isTruthy = (value: string) => {
   const normalized = value.trim().toLowerCase();
@@ -85,20 +86,29 @@ export const createResendProvider = (): EmailProvider => ({
     }
 
     try {
-      const response = await fetch(RESEND_ENDPOINT, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          from: process.env.EMAIL_FROM,
-          to: [input.to],
-          subject: input.subject,
-          html: input.html,
-          text: input.text,
-        }),
-      });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), RESEND_TIMEOUT_MS);
+      let response: Response;
+
+      try {
+        response = await fetch(RESEND_ENDPOINT, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            from: process.env.EMAIL_FROM,
+            to: [input.to],
+            subject: input.subject,
+            html: input.html,
+            text: input.text,
+          }),
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       if (!response.ok) {
         const providerError = await parseResendErrorBody(response);
@@ -134,8 +144,9 @@ export const createResendProvider = (): EmailProvider => ({
         safeMessage: "Email sent.",
       };
     } catch (error) {
+      const timedOut = error instanceof Error && error.name === "AbortError";
       console.error(
-        `[email-resend-error] status=network intent=${input.intent} to=${input.to}`,
+        `[email-resend-error] status=${timedOut ? "timeout" : "network"} intent=${input.intent} to=${input.to}`,
         error
       );
       logEmailPreview(input, "Resend request failed.");

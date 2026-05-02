@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { signOut, useSession } from "next-auth/react";
+import { signOut } from "next-auth/react";
 import { usePathname } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -47,8 +47,15 @@ export type InternalShellSummary = {
   actionLabel?: string;
 };
 
+type InternalShellViewer = {
+  name?: string | null;
+  email: string;
+  image?: string | null;
+};
+
 export function InternalShell({
   children,
+  viewer,
   navLinks,
   routeMeta,
   areaLabel,
@@ -59,6 +66,7 @@ export function InternalShell({
   accentClassName,
 }: {
   children: React.ReactNode;
+  viewer: InternalShellViewer;
   navLinks: InternalShellLink[];
   routeMeta: Record<string, { eyebrow: string; title: string }>;
   areaLabel: string;
@@ -69,7 +77,6 @@ export function InternalShell({
   accentClassName: string;
 }) {
   const pathname = usePathname();
-  const session = useSession();
 
   const matchesRoutePrefix = (href: string) =>
     pathname === href || pathname.startsWith(`${href}/`);
@@ -112,6 +119,7 @@ export function InternalShell({
               <Link
                 key={link.href}
                 href={link.href}
+                prefetch={false}
                 className={cn(
                   "flex items-center gap-3 rounded-2xl px-3 py-3 text-sm font-medium transition hover:bg-white/5",
                   active && "bg-white/10 text-white"
@@ -130,7 +138,7 @@ export function InternalShell({
           <p className="mt-2 text-sm text-[var(--color-muted)]">{summary.detail}</p>
           {summary.actionHref && summary.actionLabel ? (
             <Button variant="secondary" size="sm" className="mt-4 w-full" asChild>
-              <Link href={summary.actionHref}>{summary.actionLabel}</Link>
+              <Link href={summary.actionHref} prefetch={false}>{summary.actionLabel}</Link>
             </Button>
           ) : null}
         </div>
@@ -148,6 +156,7 @@ export function InternalShell({
             {switchLink ? (
               <Link
                 href={switchLink.href}
+                prefetch={false}
                 className="hidden items-center gap-2 rounded-full border border-[var(--color-border)] px-3 py-2 text-sm font-semibold text-[var(--color-accent-2)] lg:flex"
               >
                 <ArrowRightLeft className="h-4 w-4" />
@@ -155,10 +164,10 @@ export function InternalShell({
               </Link>
             ) : null}
             <div className="flex items-center gap-2 rounded-full border border-[var(--color-border)] px-3 py-2">
-              <Avatar src={session.data?.user?.image} name={session.data?.user?.name} className="h-8 w-8" />
+              <Avatar src={viewer.image} name={viewer.name} className="h-8 w-8" />
               <div className="hidden text-left text-sm md:block">
-                <p className="font-semibold leading-tight">{session.data?.user?.name ?? "Team member"}</p>
-                <p className="text-[11px] text-[var(--color-muted)]">{session.data?.user?.email}</p>
+                <p className="font-semibold leading-tight">{viewer.name ?? "Team member"}</p>
+                <p className="text-[11px] text-[var(--color-muted)]">{viewer.email}</p>
               </div>
               <button
                 onClick={() => signOut({ callbackUrl: "/" })}

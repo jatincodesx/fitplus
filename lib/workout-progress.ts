@@ -1,4 +1,4 @@
-import { Prisma, WorkoutSession } from "@prisma/client";
+import type { Prisma, WorkoutSession } from "@prisma/client";
 import { prisma } from "./prisma";
 
 type SessionWithExercises = Prisma.WorkoutSessionGetPayload<{
